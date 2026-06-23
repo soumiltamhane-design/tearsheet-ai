@@ -40,17 +40,21 @@ def _clamp(x, lo=0, hi=100):
 
 def score_financial_health(d: dict) -> float:
     test = qe.two_minute_test(d)
+    for k in list(test.keys()):
+        if k in ("market_cap_cr", "overall_pass"):
+            test.pop(k)
+            
+    test_score = sum(1 for v in test.values() if v is True)
+    test_score = (test_score / len(test) * 100) if test else 100.0
+
     lev = qe.leverage(d)
-    fcf = qe.fcf_metrics(d)
-
-    test_score = sum(1 for k, v in test.items() if k not in ("market_cap_cr",) and v is True)
-    test_score = test_score / 7 * 100  # 7 boolean checks in two_minute_test
-
-    de_latest = lev["debt_to_equity"][-1] or 0
+    de_latest = lev["debt_to_equity"][-1] if lev["debt_to_equity"] else 0.0
+    de_latest = de_latest or 0.0
     de_score = 100 if de_latest < 0.3 else (60 if de_latest < 1 else (30 if de_latest < 2 else 0))
 
+    fcf = qe.fcf_metrics(d)
     fcf_positive_years = sum(1 for f in fcf["fcf"] if f > 0)
-    fcf_consistency_score = fcf_positive_years / len(fcf["fcf"]) * 100
+    fcf_consistency_score = (fcf_positive_years / len(fcf["fcf"]) * 100) if fcf["fcf"] else 100.0
 
     return _clamp(0.5 * test_score + 0.25 * de_score + 0.25 * fcf_consistency_score)
 
@@ -62,7 +66,6 @@ def score_growth(d: dict) -> float:
     def cagr_to_score(c):
         if c is None:
             return None
-        # 0% CAGR -> 20, 15%+ CAGR -> 100, roughly linear in between
         return _clamp(20 + (c / 0.15) * 80)
 
     sales_scores = [cagr_to_score(v) for v in sales_h.values() if v is not None]
@@ -71,7 +74,7 @@ def score_growth(d: dict) -> float:
 
     consistency = qe.growth_consistency(d["net_profit"])
     penalty = {"accelerating or stable": 1.0, "decelerating, but not sharply": 0.85,
-               "decelerating sharply": 0.6, "insufficient data": 0.9}[consistency]
+               "decelerating sharply": 0.6, "insufficient data": 0.9}.get(consistency, 1.0)
 
     return _clamp(base * penalty)
 
@@ -84,12 +87,11 @@ def score_valuation(d: dict) -> float:
     if mcap <= iv["iv_low"]:
         iv_score = 100
     elif mcap <= iv["iv_high"]:
-        # linear from 100 at iv_low down to 40 at iv_high
         span = iv["iv_high"] - iv["iv_low"]
         pos = (mcap - iv["iv_low"]) / span if span else 0
         iv_score = 100 - pos * 60
     else:
-        premium = (mcap / iv["iv_high"]) - 1
+        premium = (mcap / iv["iv_high"]) - 1 if iv["iv_high"] else 0
         iv_score = max(0, 40 - premium * 100)
 
     bonus = (10 if rv["cheaper_than_own_history"] else -10) + (10 if rv["attractive_vs_bonds"] else -5)
@@ -97,9 +99,6 @@ def score_valuation(d: dict) -> float:
 
 
 def score_technical(technical_data: dict | None) -> float:
-    """Momentum, % delivery, derivative positioning, FII/DII flow, analyst
-    target gap -- the Edelweiss-screener layer. Defaults to a neutral 50
-    when live market data isn't wired in yet (see data_fetcher.py)."""
     if not technical_data:
         return 50.0
     score = 50.0
@@ -150,7 +149,6 @@ def recommendation_bucket(score: float, vetoed: bool) -> dict:
 
 
 def run_full_score(d: dict, ai_output: dict | None = None, technical_data: dict | None = None) -> dict:
-    """Top-level entry point: combine quant + AI pillars into the final call."""
     ai_output = ai_output or {}
     pillars = {
         "moat": ai_output.get("moat_score", 50),
@@ -169,3 +167,53 @@ def run_full_score(d: dict, ai_output: dict | None = None, technical_data: dict 
         "red_flags": flags,
         "recommendation": rec,
     }
+
+# =====================================================================
+# NEW: COUPLING PIPELINE BRIDGE FOR APP.PY
+# =====================================================================
+
+def score_investment(raw_data: dict, metrics: dict) -> tuple[float, dict, bool]:
+    """
+    Standardizes structural components across open market datasets 
+    and returns parameters required by the visual reporting layer.
+    """
+    meta = raw_data.get("metadata", {})
+    fin = raw_data.get("financials", {})
+    sales_series = fin.get("sales", [1.0])
+    n = len(sales_series)
+    
+    # Mirror parsing framework across processing components
+    d = {
+        "sales": sales_series,
+        "operating_profit": fin.get("operating_profit", [0.0] * n),
+        "net_profit": fin.get("net_profit", [0.0] * n),
+        "pbt": fin.get("pbt", fin.get("net_profit", [0.0] * n)),
+        "depreciation": fin.get("depreciation", [0.0] * n),
+        "interest": fin.get("interest", [0.0] * n),
+        "tax": fin.get("tax", [0.0] * n),
+        "cfo": fin.get("cfo", fin.get("operating_cash_flow", [0.0] * n)),
+        "capex": fin.get("capex", [0.0] * n),
+        "borrowings": fin.get("borrowings", [0.0] * n),
+        "cash": fin.get("cash", [0.0] * n),
+        "debtors": fin.get("debtors", [0.0] * n),
+        "inventory": fin.get("inventory", [0.0] * n),
+        "net_block": fin.get("net_block", fin.get("fixed_assets", [1.0] * n)),
+        "other_liabilities": fin.get("other_liabilities", [0.0] * n),
+        "depreciation_pct_nfa": fin.get("depreciation_pct_nfa", [0.0] * n),
+        "equity_capital": fin.get("equity_capital", fin.get("equity", [1.0] * n)),
+        "reserves": fin.get("reserves", [0.0] * n),
+        "current_price": meta.get("current_price", 100.0),
+        "govt_bond_yield": meta.get("gsec_yield", 0.071),
+        "eps": fin.get("eps", [meta.get("eps", 1.0)] * n),
+        "price": fin.get("price", [meta.get("current_price", 100.0)] * n),
+        "dividend_payout": fin.get("dividend_payout", [meta.get("dpr", 0.3)] * n),
+        "governance_flags": raw_data.get("red_flags", {})
+    }
+    
+    score_results = run_full_score(d)
+    
+    final_score = score_results["composite_score"]
+    pillar_scores = score_results["pillar_scores"]
+    veto_triggered = score_results["red_flags"]["veto"]
+    
+    return final_score, pillar_scores, veto_triggered
