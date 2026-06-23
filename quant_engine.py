@@ -269,9 +269,9 @@ def relative_valuation(d: dict) -> dict:
     pe_series = [p / e for p, e in zip(d["price"], d["eps"]) if e]
     current_pe = d["current_price"] / d["eps"][-1]
     avg_pe = {
-        "3y": statistics.mean(pe_series[-3:]),
-        "5y": statistics.mean(pe_series[-5:]) if len(pe_series) >= 5 else None,
-        "10y": statistics.mean(pe_series[-10:]) if len(pe_series) >= 10 else None,
+        "3y": statistics.mean(pe_series[-3:]) if len(pe_series) >= 3 else current_pe,
+        "5y": statistics.mean(pe_series[-5:]) if len(pe_series) >= 5 else current_pe,
+        "10y": statistics.mean(pe_series[-10:]) if len(pe_series) >= 10 else current_pe,
     }
     cheaper_than_history = current_pe < (avg_pe["5y"] or avg_pe["3y"])
 
@@ -358,7 +358,7 @@ def expected_returns_value(
     future_profit = net_profit0 * (1 + est_cagr_10y) ** 10
     future_mcap = future_profit * exit_pe
     discounted_value = future_mcap / (1 + discount_rate) ** 10
-    premium_or_discount = (discounted_value / current_market_cap) - 1
+    premium_or_discount = (discounted_value / current_market_cap) - 1 if current_market_cap else 0
     return {
         "future_net_profit_10y": round(future_profit, 1),
         "future_market_cap_10y": round(future_mcap, 1),
@@ -373,15 +373,10 @@ def intrinsic_value_range(d: dict, assumptions: dict | None = None) -> dict:
     exactly what the 'Intrinsic Values' sheet does in both Excel templates."""
     a = assumptions or {}
     eps0 = d["eps"][-1]
-    # Use a 3-year average FCF as the DCF/Dhandho base, not the single
-    # latest year -- this matches the "Average FCF (3 Years)" cell both
-    # source templates use, and avoids one bad/great year distorting the
-    # whole intrinsic value range.
     fcf_series = fcf_metrics(d)["fcf"]
-    fcf = statistics.mean(fcf_series[-3:])
-    shares_cr = d["net_profit"][-1] / d["eps"][-1]
+    fcf = statistics.mean(fcf_series[-3:]) if len(fcf_series) >= 3 else fcf_series[-1]
+    shares_cr = d["net_profit"][-1] / d["eps"][-1] if d["eps"][-1] else 1.0
     market_cap = shares_cr * d["current_price"]
-    eq = equity_series(d)
     net_debt = d["borrowings"][-1] - d.get("cash", [0])[-1]
 
     sales_cagr_5y = cagr(d["sales"][-6:], 5) or 0.08
@@ -420,4 +415,78 @@ def intrinsic_value_range(d: dict, assumptions: dict | None = None) -> dict:
         "current_market_cap": round(market_cap, 1),
         "premium_discount_to_low": round((market_cap / low) - 1, 3) if low else None,
         "premium_discount_to_high": round((market_cap / high) - 1, 3) if high else None,
+    }
+
+# ---------------------------------------------------------------------------
+# NEW: MASTER PIPELINE COUPLING FUNCTION FOR APP.PY
+# ---------------------------------------------------------------------------
+
+def compute_all_ratios(raw_data: dict) -> dict:
+    """
+    Master orchestration function called by app.py.
+    Combines input components, maps key differences, sets safe fallbacks,
+    and returns aggregated calculation summaries for the visual UI.
+    """
+    meta = raw_data.get("metadata", {})
+    fin = raw_data.get("financials", {})
+    
+    sales_series = fin.get("sales", [1.0])
+    n = len(sales_series)
+    
+    # Standardize flat data mapping layer for custom imports
+    d = {
+        "sales": sales_series,
+        "operating_profit": fin.get("operating_profit", [0.0] * n),
+        "net_profit": fin.get("net_profit", [0.0] * n),
+        "pbt": fin.get("pbt", fin.get("net_profit", [0.0] * n)),
+        "depreciation": fin.get("depreciation", [0.0] * n),
+        "interest": fin.get("interest", [0.0] * n),
+        "tax": fin.get("tax", [0.0] * n),
+        "cfo": fin.get("cfo", fin.get("operating_cash_flow", [0.0] * n)),
+        "capex": fin.get("capex", [0.0] * n),
+        "borrowings": fin.get("borrowings", [0.0] * n),
+        "cash": fin.get("cash", [0.0] * n),
+        "debtors": fin.get("debtors", [0.0] * n),
+        "inventory": fin.get("inventory", [0.0] * n),
+        "net_block": fin.get("net_block", fin.get("fixed_assets", [1.0] * n)),
+        "other_liabilities": fin.get("other_liabilities", [0.0] * n),
+        "depreciation_pct_nfa": fin.get("depreciation_pct_nfa", [0.0] * n),
+        "equity_capital": fin.get("equity_capital", fin.get("equity", [1.0] * n)),
+        "reserves": fin.get("reserves", [0.0] * n),
+        "current_price": meta.get("current_price", 100.0),
+        "govt_bond_yield": meta.get("gsec_yield", 0.071),
+        "eps": fin.get("eps", [meta.get("eps", 1.0)] * n),
+        "price": fin.get("price", [meta.get("current_price", 100.0)] * n),
+        "dividend_payout": fin.get("dividend_payout", [meta.get("dpr", 0.3)] * n),
+        "governance_flags": raw_data.get("red_flags", {})
+    }
+    
+    # Fire off individual computation sequences
+    m_out = margins(d)
+    l_out = leverage(d)
+    r_out = returns_ratios(d)
+    f_out = fcf_metrics(d)
+    s_out = ssgr(d)
+    v_out = relative_valuation(d)
+    i_out = intrinsic_value_range(d)
+    
+    latest_roe = r_out["roe"][-1] if r_out["roe"] else 0.0
+    latest_fcf_to_sales = f_out["fcf_to_sales"][-1] if f_out["fcf_to_sales"] else 0.0
+    
+    return {
+        "sales_cagr_3y": multi_horizon_cagr(d["sales"]).get("3y", 0.0),
+        "sales_cagr_9y": multi_horizon_cagr(d["sales"]).get("9y", 0.0),
+        "growth_consistency": growth_consistency(d["sales"]),
+        "latest_operating_margin": m_out["operating_margin"][-1] if m_out["operating_margin"] else 0.0,
+        "latest_net_margin": m_out["net_margin"][-1] if m_out["net_margin"] else 0.0,
+        "latest_debt_to_equity": l_out["debt_to_equity"][-1] if l_out["debt_to_equity"] else 0.0,
+        "latest_interest_coverage": l_out["interest_coverage"][-1] if l_out["interest_coverage"] else float("inf"),
+        "latest_roe": latest_roe,
+        "latest_roce": r_out["roce"][-1] if r_out["roce"] else 0.0,
+        "latest_fcf": f_out["fcf"][-1] if f_out["fcf"] else 0.0,
+        "latest_fcf_to_sales": latest_fcf_to_sales,
+        "latest_ssgr": s_out[-1] if s_out else 0.0,
+        "profitability_matrix": profitability_matrix(latest_roe, latest_fcf_to_sales),
+        "relative_valuation": v_out,
+        "intrinsic_value_range": i_out
     }
