@@ -37,7 +37,7 @@ def analyze(company: str, sector: str, quant_summary: dict, qualitative_context:
     """Call Gemini API to score moat/governance and generate narrative."""
 
     # Get API key — from environment (secrets) OR hardcoded fallback
-    api_key = os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY") or "AQ.Ab8RN6IuWW5IhpKivoR4OEQohFzP7KVJyJIPzdNz4tak0AHxgQ"
+   api_key = os.environ.get("GROQ_API_KEY") or "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"
 
     if not api_key:
         return _stub_response(company, reason="No API key found in environment")
