@@ -30,12 +30,21 @@ CALL_COLORS = {
 st.sidebar.title("📊 Tearsheet AI")
 st.sidebar.caption("Ticker in → 6-pillar score → tear sheet out")
 
-available = fetcher.list_available_samples()
-choice = st.sidebar.selectbox(
-    "Company (sample data -- see README to wire in live tickers)",
-    available,
-    format_func=lambda k: k.replace("_", " ").title(),
-)
+mode = st.sidebar.radio("Data source", ["Sample companies", "Live NSE ticker"])
+
+if mode == "Sample companies":
+    available = fetcher.list_available_samples()
+    choice = st.sidebar.selectbox(
+        "Company",
+        available,
+        format_func=lambda k: k.replace("_", " ").title(),
+    )
+    use_live = False
+else:
+    live_ticker = st.sidebar.text_input("NSE Ticker Symbol", placeholder="e.g. RELIANCE, TCS, HDFCBANK")
+    choice = live_ticker.strip().upper() if live_ticker else ""
+    use_live = True
+    st.sidebar.caption("Examples: RELIANCE, TCS, INFY, HDFCBANK, ITC, WIPRO, TATAMOTORS")
 
 api_key_input = None
 ai_mode = "auto"  # Always auto-run with Gemini, no copy-paste UI
@@ -73,6 +82,14 @@ if not run:
     st.stop()
 
 with st.spinner("Running quant engine..."):
+    if use_live and choice:
+    with st.spinner(f"Fetching live data for {choice} from NSE..."):
+        try:
+            d = fetcher.fetch_live(choice)
+        except Exception as e:
+            st.error(f"Could not fetch data for {choice}: {e}")
+            st.stop()
+else:
     d = fetcher.load_sample(choice)
     quant_summary = {
         "margins": {k: v[-1] for k, v in qe.margins(d).items()},
