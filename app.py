@@ -1,14 +1,3 @@
-"""
-app.py
--------
-Streamlit front end. Run with: streamlit run app.py
-
-Pipeline per click: data_fetcher -> quant_engine -> ai_reasoning ->
-scoring_engine -> this UI. Nothing in this file computes anything itself;
-it only renders what the other four modules already produced, which is
-what keeps the analysis auditable.
-"""
-
 import json
 import streamlit as st
 
@@ -24,72 +13,35 @@ CALL_COLORS = {
     "Avoid": "#cf222e", "Sell/Avoid": "#cf222e",
 }
 
-# --------------------------------------------------------------------------
-# Sidebar
-# --------------------------------------------------------------------------
 st.sidebar.title("📊 Tearsheet AI")
 st.sidebar.caption("Ticker in → 6-pillar score → tear sheet out")
 
-mode = st.sidebar.radio("Data source", ["Sample companies", "Live NSE ticker"])
-
-if mode == "Sample companies":
-    available = fetcher.list_available_samples()
-    choice = st.sidebar.selectbox(
-        "Company",
-        available,
-        format_func=lambda k: k.replace("_", " ").title(),
-    )
-    use_live = False
-else:
-    live_ticker = st.sidebar.text_input("NSE Ticker Symbol", placeholder="e.g. RELIANCE, TCS, HDFCBANK")
-    choice = live_ticker.strip().upper() if live_ticker else ""
-    use_live = True
-    st.sidebar.caption("Examples: RELIANCE, TCS, INFY, HDFCBANK, ITC, WIPRO, TATAMOTORS")
-
-api_key_input = None
-ai_mode = "auto"  # Always auto-run with Gemini, no copy-paste UI
+available = fetcher.list_available_samples()
+choice = st.sidebar.selectbox(
+    "Company (sample data)",
+    available,
+    format_func=lambda k: k.replace("_", " ").title(),
+)
 
 qualitative_context = st.sidebar.text_area(
-    "Optional: paste annual report / concall excerpts here",
+    "Optional: paste annual report excerpts",
     height=120,
-    help="In production this would be fetched automatically (see data_fetcher.py). "
-         "For this demo, paste anything you want the AI layer to actually read."
 )
 
 run = st.sidebar.button("Run analysis", type="primary", use_container_width=True)
 
 st.sidebar.divider()
 st.sidebar.caption(
-    "✨ **AI layer:** Auto-powered by Google Gemini (free, 1500 analyses/day). "
-    "Moat + governance scores + narrative auto-generate — no copy-pasting needed."
+    "✨ AI layer: Auto-powered by Google Gemini (free). No copy-pasting needed."
 )
 
-# --------------------------------------------------------------------------
-# Main
-# --------------------------------------------------------------------------
 if not run:
     st.title("Tearsheet AI")
-    st.write(
-        "Pick a company on the left and hit **Run analysis**. This prototype ships with "
-        "two fully validated sample companies (Bajaj Auto, Hero Motocorp) so you can see "
-        "the full pipeline work end-to-end before wiring in live data."
-    )
-    st.info(
-        "Every ratio here was checked against the Safal Niveshak / Investor Diary Excel "
-        "templates' own outputs -- see `validate.py`.",
-        icon="✅",
-    )
+    st.write("Pick a company and hit **Run analysis**.")
+    st.info("Validated against Safal Niveshak / Investor Diary Excel templates.", icon="✅")
     st.stop()
 
 with st.spinner("Running quant engine..."):
-    if use_live and choice:
-    with st.spinner(f"Fetching live data for {choice} from NSE..."):
-        try:
-            d = fetcher.fetch_live(choice)
-        except Exception as e:
-            st.error(f"Could not fetch data for {choice}: {e}")
-            st.stop()
-else:
     d = fetcher.load_sample(choice)
     quant_summary = {
         "margins": {k: v[-1] for k, v in qe.margins(d).items()},
@@ -103,12 +55,8 @@ else:
         "two_minute_test": qe.two_minute_test(d),
     }
 
-ai_out = None
-if ai_mode == "auto":
-    with st.spinner("Running AI analysis (Gemini)..."):
-        ai_out = ar.analyze(d["company"], d["sector"], quant_summary, qualitative_context)
-else:
-    ai_out = ar._stub_response(d["company"], reason="Skipped")
+with st.spinner("Running AI analysis (Gemini)..."):
+    ai_out = ar.analyze(d["company"], d["sector"], quant_summary, qualitative_context)
 
 with st.spinner("Computing final score..."):
     result = se.run_full_score(d, ai_output=ai_out)
@@ -119,7 +67,6 @@ roe_latest = quant_summary["returns"]["roe"]
 fcf_to_sales_latest = quant_summary["fcf"]["fcf_to_sales"]
 quadrant = qe.profitability_matrix(roe_latest, fcf_to_sales_latest)
 
-# ---- Header -----------------------------------------------------------
 col1, col2 = st.columns([3, 1])
 with col1:
     st.title(d["company"])
@@ -129,8 +76,7 @@ with col2:
     color = CALL_COLORS.get(call, "#57606a")
     st.markdown(
         f"<div style='text-align:right'>"
-        f"<span style='background:{color}22;color:{color};padding:6px 14px;"
-        f"border-radius:8px;font-weight:600;font-size:15px'>"
+        f"<span style='background:{color}22;color:{color};padding:6px 14px;border-radius:8px;font-weight:600;font-size:15px'>"
         f"{call} · {result['composite_score']}/100</span><br>"
         f"<span style='color:#57606a;font-size:13px'>{result['recommendation']['core_or_satellite']} position</span>"
         f"</div>",
@@ -138,23 +84,20 @@ with col2:
     )
 
 if result["red_flags"]["veto"]:
-    st.error(f"⚠️ Red-flag override active: {', '.join(result['red_flags']['hard_flags'])}. "
-             f"Recommendation capped at Avoid regardless of pillar scores below.")
+    st.error(f"⚠️ Red-flag override: {', '.join(result['red_flags']['hard_flags'])}")
 
 st.divider()
 
-# ---- Pillar scores ------------------------------------------------------
 st.subheader("Pillar scores")
 cols = st.columns(6)
 labels = {"moat": "Moat & quality", "financial_health": "Financial health", "growth": "Growth",
           "valuation": "Valuation", "technical": "Technical & flows", "governance": "Governance"}
 for col, (key, label) in zip(cols, labels.items()):
     col.metric(label, f"{result['pillar_scores'][key]:.0f}")
-st.caption(f"Profitability matrix classification: **{quadrant}**")
+st.caption(f"Profitability: **{quadrant}**")
 
 st.divider()
 
-# ---- Intrinsic value range ----------------------------------------------
 st.subheader("Intrinsic value range vs current price")
 c1, c2, c3, c4 = st.columns(4)
 c1.metric("Ben Graham", f"₹{iv['ben_graham_range'][0]:,.0f}–{iv['ben_graham_range'][1]:,.0f} cr")
@@ -175,22 +118,18 @@ st.markdown(
     f"</div>",
     unsafe_allow_html=True,
 )
-st.caption(f"Current P/E {rv['current_pe']} vs 5y average {rv['avg_pe']['5y']} · "
-           f"Earnings yield {rv['earnings_yield']:.2%} vs G-Sec {rv['govt_bond_yield']:.2%}")
 
 st.divider()
 
-# ---- Red flags ------------------------------------------------------------
 st.subheader("Red flags")
 all_flags = result["red_flags"]["hard_flags"] + result["red_flags"]["soft_flags"]
 if all_flags:
     st.write(" ".join(f"`{f}`" for f in all_flags))
 else:
-    st.success("No hard or soft red flags triggered for this dataset.")
+    st.success("No red flags triggered.")
 
 st.divider()
 
-# ---- AI narrative ----------------------------------------------------------
 st.subheader("AI reasoning (Gemini-powered)")
 
 if ai_out.get("_stub"):
