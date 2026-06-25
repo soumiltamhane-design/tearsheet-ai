@@ -39,7 +39,7 @@ Return ONLY valid JSON, no markdown fences:
 
 def analyze(company: str, sector: str, quant_summary: dict, qualitative_context: str = "") -> dict:
     """Call Google Gemini API (free) to score moat/governance and generate narrative."""
-    api_key = os.environ.get("GEMINI_API_KEY")
+    api_key = os.environ.get("AQ.Ab8RN6IduiaCuVshzwRqGHQo8ni0pBuOMPvyuqyAyN56fy2JbA")
     if not api_key:
         return _stub_response(company, reason="No GEMINI_API_KEY in environment")
 
