@@ -51,15 +51,16 @@ if not run:
     st.stop()
 
 with st.spinner("Running quant engine..."):
-   if use_live and choice:
-    with st.spinner(f"Fetching live data for {choice} from NSE..."):
-        try:
-            d = fetcher.fetch_live(choice)
-        except Exception as e:
-            st.error(f"Could not fetch data for {choice}: {e}")
-            st.stop()
-else:
-    d = fetcher.load_sample(choice)
+    if use_live and choice:
+        with st.spinner(f"Fetching live data for {choice} from NSE..."):
+            try:
+                d = fetcher.fetch_live(choice)
+            except Exception as e:
+                st.error(f"Could not fetch data for {choice}: {e}")
+                st.stop()
+    else:
+        d = fetcher.load_sample(choice)
+
     quant_summary = {
         "margins": {k: v[-1] for k, v in qe.margins(d).items()},
         "returns": {k: v[-1] for k, v in qe.returns_ratios(d).items()},
@@ -68,6 +69,7 @@ else:
         "growth_consistency": qe.growth_consistency(d["net_profit"]),
         "fcf": {k: v[-1] for k, v in qe.fcf_metrics(d).items()},
         "intrinsic_value_range": qe.intrinsic_value_range(d),
+    }
         "relative_valuation": qe.relative_valuation(d),
         "two_minute_test": qe.two_minute_test(d),
     }
