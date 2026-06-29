@@ -69,8 +69,7 @@ with st.spinner("Running quant engine..."):
         "growth_consistency": qe.growth_consistency(d["net_profit"]),
         "fcf": {k: v[-1] for k, v in qe.fcf_metrics(d).items()},
         "intrinsic_value_range": qe.intrinsic_value_range(d),
-    }
-        "relative_valuation": qe.relative_valuation(d),
+         "relative_valuation": qe.relative_valuation(d),
         "two_minute_test": qe.two_minute_test(d),
     }
 
