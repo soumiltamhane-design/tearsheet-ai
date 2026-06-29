@@ -1,7 +1,7 @@
 import os, json
 
 def analyze(company, sector, quant_summary, qualitative_context=""):
-    api_key = os.environ.get("GROQ_API_KEY") or "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"
+    api_key = os.environ.get("GROQ_API_KEY") or "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"
     if not api_key or "YOURKEY" in api_key:
         return _stub_response(company, "No key")
     try:
