@@ -20,6 +20,35 @@ import statistics
 
 
 # ---------------------------------------------------------------------------
+# Safety helpers
+# ---------------------------------------------------------------------------
+
+def safe_div(num, den):
+    """Returns None instead of crashing when den is 0/None/missing, or
+    num is None. This is the single chokepoint for every ratio in this
+    file -- live data (yfinance) routinely has zero/missing line items
+    that clean Excel-sourced sample data never had."""
+    if num is None or den is None:
+        return None
+    try:
+        if den == 0:
+            return None
+        return num / den
+    except (TypeError, ZeroDivisionError):
+        return None
+
+
+def safe_mean(values: list) -> float | None:
+    """statistics.mean() throws StatisticsError on an empty list -- this
+    happens whenever every ROE/PE/etc value in a window came back None
+    (filtered out) for a given company."""
+    clean = [v for v in values if v is not None]
+    if not clean:
+        return None
+    return statistics.mean(clean)
+
+
+# ---------------------------------------------------------------------------
 # Growth
 # ---------------------------------------------------------------------------
 
@@ -35,7 +64,10 @@ def cagr(values: list[float], n_years: int | None = None) -> float | None:
         return None
     if values[0] < 0 or values[-1] < 0:
         return None
-    return (values[-1] / values[0]) ** (1 / n) - 1
+    ratio = safe_div(values[-1], values[0])
+    if ratio is None:
+        return None
+    return ratio ** (1 / n) - 1
 
 
 def multi_horizon_cagr(values: list[float], horizons=(3, 5, 7, 9)) -> dict:
@@ -54,8 +86,7 @@ def multi_horizon_cagr(values: list[float], horizons=(3, 5, 7, 9)) -> dict:
 def yoy_growth(values: list[float]) -> list[float | None]:
     out = [None]
     for i in range(1, len(values)):
-        prev = values[i - 1]
-        out.append(None if not prev else (values[i] - prev) / prev)
+        out.append(safe_div(values[i] - values[i - 1], values[i - 1]))
     return out
 
 
@@ -83,9 +114,9 @@ def margins(d: dict) -> dict:
     pbt = d["pbt"]
     npft = d["net_profit"]
     return {
-        "operating_margin": [o / s for o, s in zip(op, sales)],
-        "pbt_margin": [p / s for p, s in zip(pbt, sales)],
-        "net_margin": [n / s for n, s in zip(npft, sales)],
+        "operating_margin": [safe_div(o, s) for o, s in zip(op, sales)],
+        "pbt_margin": [safe_div(p, s) for p, s in zip(pbt, sales)],
+        "net_margin": [safe_div(n, s) for n, s in zip(npft, sales)],
     }
 
 
@@ -95,9 +126,12 @@ def turnover_ratios(d: dict) -> dict:
     inventory = d["inventory"]
     net_block = d["net_block"]
     return {
-        "debtor_days": [365 * deb / s if s else None for deb, s in zip(debtors, sales)],
-        "inventory_turnover": [s / inv if inv else None for s, inv in zip(sales, inventory)],
-        "fixed_asset_turnover": [s / nb if nb else None for s, nb in zip(sales, net_block)],
+        "debtor_days": [
+            (365 * r) if (r := safe_div(deb, s)) is not None else None
+            for deb, s in zip(debtors, sales)
+        ],
+        "inventory_turnover": [safe_div(s, inv) for s, inv in zip(sales, inventory)],
+        "fixed_asset_turnover": [safe_div(s, nb) for s, nb in zip(sales, net_block)],
     }
 
 
@@ -106,7 +140,7 @@ def turnover_ratios(d: dict) -> dict:
 # ---------------------------------------------------------------------------
 
 def equity_series(d: dict) -> list[float]:
-    return [ec + r for ec, r in zip(d["equity_capital"], d["reserves"])]
+    return [(ec or 0) + (r or 0) for ec, r in zip(d["equity_capital"], d["reserves"])]
 
 
 def leverage(d: dict) -> dict:
@@ -114,11 +148,16 @@ def leverage(d: dict) -> dict:
     borr = d["borrowings"]
     interest = d["interest"]
     pbt = d["pbt"]
+    coverage = []
+    for p, i in zip(pbt, interest):
+        if not i:
+            coverage.append(float("inf"))
+        else:
+            ratio = safe_div((p or 0) + i, i)
+            coverage.append(ratio if ratio is not None else float("inf"))
     return {
-        "debt_to_equity": [b / e if e else None for b, e in zip(borr, eq)],
-        "interest_coverage": [
-            (p + i) / i if i else float("inf") for p, i in zip(pbt, interest)
-        ],
+        "debt_to_equity": [safe_div(b, e) for b, e in zip(borr, eq)],
+        "interest_coverage": coverage,
     }
 
 
@@ -135,15 +174,15 @@ def returns_ratios(d: dict) -> dict:
 
     roe, roce, roic = [], [], []
     for i in range(len(eq)):
-        capital_employed = eq[i] + borr[i]
-        ebit = pbt[i] + interest[i]
-        tax_rate = tax[i] / pbt[i] if pbt[i] else 0
+        capital_employed = eq[i] + (borr[i] or 0)
+        ebit = (pbt[i] or 0) + (interest[i] or 0)
+        tax_rate = safe_div(tax[i], pbt[i]) or 0
         nopat = ebit * (1 - tax_rate)
-        invested_capital = capital_employed - cash[i]
+        invested_capital = capital_employed - (cash[i] or 0)
 
-        roe.append(npft[i] / eq[i] if eq[i] else None)
-        roce.append(ebit / capital_employed if capital_employed else None)
-        roic.append(nopat / invested_capital if invested_capital else None)
+        roe.append(safe_div(npft[i], eq[i]))
+        roce.append(safe_div(ebit, capital_employed))
+        roic.append(safe_div(nopat, invested_capital))
 
     return {"roe": roe, "roce": roce, "roic": roic}
 
@@ -155,11 +194,13 @@ def dupont(d: dict) -> dict:
     npft = d["net_profit"]
     other_liab = d["other_liabilities"]
     borr = d["borrowings"]
-    total_assets = [e + b + ol for e, b, ol in zip(eq, borr, other_liab)]
+    total_assets = [
+        e + (b or 0) + (ol or 0) for e, b, ol in zip(eq, borr, other_liab)
+    ]
 
-    net_margin = [n / s for n, s in zip(npft, sales)]
-    asset_turnover = [s / ta if ta else None for s, ta in zip(sales, total_assets)]
-    fin_leverage = [ta / e if e else None for ta, e in zip(total_assets, eq)]
+    net_margin = [safe_div(n, s) for n, s in zip(npft, sales)]
+    asset_turnover = [safe_div(s, ta) for s, ta in zip(sales, total_assets)]
+    fin_leverage = [safe_div(ta, e) for ta, e in zip(total_assets, eq)]
     roe_check = [
         nm * at * fl if None not in (nm, at, fl) else None
         for nm, at, fl in zip(net_margin, asset_turnover, fin_leverage)
@@ -181,12 +222,12 @@ def fcf_metrics(d: dict) -> dict:
     capex = d["capex"]
     sales = d["sales"]
     npft = d["net_profit"]
-    fcf = [c - x for c, x in zip(cfo, capex)]
+    fcf = [(c or 0) - (x or 0) for c, x in zip(cfo, capex)]
     return {
         "fcf": fcf,
-        "fcf_to_sales": [f / s if s else None for f, s in zip(fcf, sales)],
-        "fcf_to_net_profit": [f / n if n else None for f, n in zip(fcf, npft)],
-        "cfo_to_capex": [c / x if x else None for c, x in zip(cfo, capex)],
+        "fcf_to_sales": [safe_div(f, s) for f, s in zip(fcf, sales)],
+        "fcf_to_net_profit": [safe_div(f, n) for f, n in zip(fcf, npft)],
+        "cfo_to_capex": [safe_div(c, x) for c, x in zip(cfo, capex)],
     }
 
 
@@ -205,12 +246,14 @@ def ssgr(d: dict) -> list[float | None]:
 
     out = []
     for i in range(len(sales)):
-        nfat = sales[i] / net_block[i] if net_block[i] else None
-        npm = npft[i] / sales[i] if sales[i] else None
+        nfat = safe_div(sales[i], net_block[i])
+        npm = safe_div(npft[i], sales[i])
         if nfat is None or npm is None:
             out.append(None)
             continue
-        out.append(nfat * npm * (1 - dpr[i]) - dep_pct_nfa[i])
+        payout = dpr[i] if dpr[i] is not None else 0
+        dep = dep_pct_nfa[i] if dep_pct_nfa[i] is not None else 0
+        out.append(nfat * npm * (1 - payout) - dep)
     return out
 
 
@@ -220,22 +263,23 @@ def ssgr(d: dict) -> list[float | None]:
 
 def two_minute_test(d: dict) -> dict:
     eq = equity_series(d)
-    shares_cr = d["net_profit"][-1] / d["eps"][-1] if d["eps"][-1] else None
+    shares_cr = safe_div(d["net_profit"][-1], d["eps"][-1])
     market_cap = (shares_cr * d["current_price"]) if shares_cr else None
     roe = returns_ratios(d)["roe"]
     fcf = fcf_metrics(d)["fcf"]
     de = leverage(d)["debt_to_equity"]
 
+    mean_roe = safe_mean(roe)
+
     checks = {
         "min_quality_hurdle": market_cap is not None and market_cap > 500,
-        "ever_made_operating_profit": all(op > 0 for op in d["operating_profit"]),
-        "consistent_cfo": all(c > 0 for c in d["cfo"]),
+        "ever_made_operating_profit": all((op or 0) > 0 for op in d["operating_profit"]),
+        "consistent_cfo": all((c or 0) > 0 for c in d["cfo"]),
         "roe_above_15_with_low_leverage": (
-            statistics.mean([r for r in roe if r is not None]) > 0.15
-            and (de[-1] or 0) < 1
+            mean_roe is not None and mean_roe > 0.15 and (de[-1] or 0) < 1
         ),
         "clean_balance_sheet": (de[-1] or 0) < 1,
-        "generates_fcf": fcf[-1] > 0,
+        "generates_fcf": (fcf[-1] or 0) > 0,
         "share_dilution_under_2pct": d.get("governance_flags", {}).get(
             "share_dilution_pct_yoy", 0
         ) < 0.02,
@@ -266,26 +310,30 @@ def profitability_matrix(latest_roe: float, latest_fcf_to_sales: float) -> str:
 # ---------------------------------------------------------------------------
 
 def relative_valuation(d: dict) -> dict:
-    pe_series = [p / e for p, e in zip(d["price"], d["eps"]) if e]
-    current_pe = d["current_price"] / d["eps"][-1]
+    pe_series = [r for p, e in zip(d["price"], d["eps"]) if (r := safe_div(p, e)) is not None]
+    current_pe = safe_div(d["current_price"], d["eps"][-1])
     avg_pe = {
-        "3y": statistics.mean(pe_series[-3:]) if len(pe_series) >= 3 else current_pe,
-        "5y": statistics.mean(pe_series[-5:]) if len(pe_series) >= 5 else current_pe,
-        "10y": statistics.mean(pe_series[-10:]) if len(pe_series) >= 10 else current_pe,
+        "3y": safe_mean(pe_series[-3:]) if len(pe_series) >= 3 else current_pe,
+        "5y": safe_mean(pe_series[-5:]) if len(pe_series) >= 5 else current_pe,
+        "10y": safe_mean(pe_series[-10:]) if len(pe_series) >= 10 else current_pe,
     }
-    cheaper_than_history = current_pe < (avg_pe["5y"] or avg_pe["3y"])
+    reference_pe = avg_pe["5y"] if avg_pe["5y"] is not None else avg_pe["3y"]
+    cheaper_than_history = (
+        current_pe is not None and reference_pe is not None and current_pe < reference_pe
+    )
 
-    earnings_yield = d["eps"][-1] / d["current_price"]
-    yield_spread = earnings_yield - d["govt_bond_yield"]
+    earnings_yield = safe_div(d["eps"][-1], d["current_price"])
+    bond_yield = d["govt_bond_yield"]
+    yield_spread = (earnings_yield - bond_yield) if earnings_yield is not None else None
 
     return {
-        "current_pe": round(current_pe, 2),
-        "avg_pe": {k: (round(v, 2) if v else None) for k, v in avg_pe.items()},
+        "current_pe": round(current_pe, 2) if current_pe is not None else None,
+        "avg_pe": {k: (round(v, 2) if v is not None else None) for k, v in avg_pe.items()},
         "cheaper_than_own_history": cheaper_than_history,
-        "earnings_yield": round(earnings_yield, 4),
-        "govt_bond_yield": d["govt_bond_yield"],
-        "yield_spread_vs_bond": round(yield_spread, 4),
-        "attractive_vs_bonds": yield_spread > 0,
+        "earnings_yield": round(earnings_yield, 4) if earnings_yield is not None else None,
+        "govt_bond_yield": bond_yield,
+        "yield_spread_vs_bond": round(yield_spread, 4) if yield_spread is not None else None,
+        "attractive_vs_bonds": (yield_spread or 0) > 0,
     }
 
 
@@ -295,7 +343,7 @@ def relative_valuation(d: dict) -> dict:
 
 def ben_graham_value(eps: float, growth_rate: float, pe_no_growth: float = 8.5) -> float:
     """Value = EPS x (8.5 + 2g), g in percentage points (e.g. 10 for 10%)."""
-    return eps * (pe_no_growth + 2 * growth_rate * 100)
+    return (eps or 0) * (pe_no_growth + 2 * (growth_rate or 0) * 100)
 
 
 def dcf_value(
@@ -307,16 +355,17 @@ def dcf_value(
     net_debt: float = 0,
 ) -> dict:
     pv_total = 0.0
-    fcf = fcf0
+    fcf = fcf0 or 0
     for yr in range(1, 11):
         g = growth_yr1_5 if yr <= 5 else growth_yr6_10
-        fcf = fcf * (1 + g)
+        fcf = fcf * (1 + (g or 0))
         pv = fcf / ((1 + discount_rate) ** yr)
         pv_total += pv
     terminal_fcf = fcf * (1 + terminal_growth)
-    terminal_value = terminal_fcf / (discount_rate - terminal_growth)
+    denom = (discount_rate - terminal_growth)
+    terminal_value = safe_div(terminal_fcf, denom) or 0
     pv_terminal = terminal_value / ((1 + discount_rate) ** 10)
-    equity_value = pv_total + pv_terminal - net_debt
+    equity_value = pv_total + pv_terminal - (net_debt or 0)
     return {"enterprise_value": round(pv_total + pv_terminal, 1), "equity_value": round(equity_value, 1)}
 
 
@@ -330,8 +379,8 @@ def dhandho_value(
 ) -> float:
     """Mohnish Pabrai's reverse-FCF model: step the growth rate down every
     few years, discount each year's FCF back, add excess cash."""
-    pv_total = excess_cash
-    fcf = fcf0
+    pv_total = excess_cash or 0
+    fcf = fcf0 or 0
     for yr in range(1, 11):
         if yr <= 3:
             g = growth_yr1_3
@@ -339,7 +388,7 @@ def dhandho_value(
             g = growth_yr4_6
         else:
             g = growth_yr7_10
-        fcf = fcf * (1 + g)
+        fcf = fcf * (1 + (g or 0))
         pv_total += fcf / ((1 + discount_rate) ** yr)
     return round(pv_total, 1)
 
@@ -355,10 +404,11 @@ def expected_returns_value(
     """Buffett's 'look-through' reverse model: project profit 10y out,
     apply an assumed exit multiple, discount the resulting market cap
     back to today, compare with the current price tag."""
-    future_profit = net_profit0 * (1 + est_cagr_10y) ** 10
-    future_mcap = future_profit * exit_pe
+    future_profit = (net_profit0 or 0) * (1 + (est_cagr_10y or 0)) ** 10
+    future_mcap = future_profit * (exit_pe or 0)
     discounted_value = future_mcap / (1 + discount_rate) ** 10
-    premium_or_discount = (discounted_value / current_market_cap) - 1 if current_market_cap else 0
+    premium_or_discount = safe_div(discounted_value, current_market_cap) or 0
+    premium_or_discount = premium_or_discount - 1 if current_market_cap else 0
     return {
         "future_net_profit_10y": round(future_profit, 1),
         "future_market_cap_10y": round(future_mcap, 1),
@@ -372,12 +422,13 @@ def intrinsic_value_range(d: dict, assumptions: dict | None = None) -> dict:
     company's own historical growth, and returns a consolidated range --
     exactly what the 'Intrinsic Values' sheet does in both Excel templates."""
     a = assumptions or {}
-    eps0 = d["eps"][-1]
+    eps0 = d["eps"][-1] or 0
     fcf_series = fcf_metrics(d)["fcf"]
-    fcf = statistics.mean(fcf_series[-3:]) if len(fcf_series) >= 3 else fcf_series[-1]
-    shares_cr = d["net_profit"][-1] / d["eps"][-1] if d["eps"][-1] else 1.0
-    market_cap = shares_cr * d["current_price"]
-    net_debt = d["borrowings"][-1] - d.get("cash", [0])[-1]
+    fcf = safe_mean(fcf_series[-3:]) if len(fcf_series) >= 3 else fcf_series[-1]
+    fcf = fcf or 0
+    shares_cr = safe_div(d["net_profit"][-1], d["eps"][-1]) or 1.0
+    market_cap = shares_cr * (d["current_price"] or 0)
+    net_debt = (d["borrowings"][-1] or 0) - (d.get("cash", [0])[-1] or 0)
 
     sales_cagr_5y = cagr(d["sales"][-6:], 5) or 0.08
     npat_cagr_5y = cagr(d["net_profit"][-6:], 5) or 0.08
@@ -396,10 +447,12 @@ def intrinsic_value_range(d: dict, assumptions: dict | None = None) -> dict:
     dhandho_low = dhandho_value(fcf, g_low, g_low * 0.8, g_low * 0.5, 0.12, max(-net_debt, 0))
     dhandho_high = dhandho_value(fcf, g_high, g_high * 0.8, g_high * 0.5, 0.12, max(-net_debt, 0))
 
+    rv = relative_valuation(d)
+    exit_pe = a.get("exit_pe", rv["avg_pe"]["5y"] if rv["avg_pe"]["5y"] is not None else (rv["current_pe"] or 15))
+
     er = expected_returns_value(
-        d["net_profit"][-1], npat_cagr_5y, relative_valuation(d)["current_pe"],
-        a.get("exit_pe", relative_valuation(d)["avg_pe"]["5y"] or relative_valuation(d)["current_pe"]),
-        a.get("discount_rate", 0.12), market_cap
+        d["net_profit"][-1], npat_cagr_5y, rv["current_pe"],
+        exit_pe, a.get("discount_rate", 0.12), market_cap
     )
 
     low = min(ben_graham_low, dcf["equity_value"], dhandho_low, er["discounted_value_today"])
@@ -413,8 +466,8 @@ def intrinsic_value_range(d: dict, assumptions: dict | None = None) -> dict:
         "iv_low": round(low, 1),
         "iv_high": round(high, 1),
         "current_market_cap": round(market_cap, 1),
-        "premium_discount_to_low": round((market_cap / low) - 1, 3) if low else None,
-        "premium_discount_to_high": round((market_cap / high) - 1, 3) if high else None,
+        "premium_discount_to_low": round(safe_div(market_cap, low) - 1, 3) if low and safe_div(market_cap, low) is not None else None,
+        "premium_discount_to_high": round(safe_div(market_cap, high) - 1, 3) if high and safe_div(market_cap, high) is not None else None,
     }
 
 # ---------------------------------------------------------------------------
@@ -460,6 +513,16 @@ def compute_all_ratios(raw_data: dict) -> dict:
         "dividend_payout": fin.get("dividend_payout", [meta.get("dpr", 0.3)] * n),
         "governance_flags": raw_data.get("red_flags", {})
     }
+
+    # Guard against any None slipping into a zero-default field (yfinance
+    # sometimes returns None rather than omitting the key entirely).
+    for key in (
+        "sales", "operating_profit", "net_profit", "pbt", "interest", "tax",
+        "cfo", "capex", "borrowings", "cash", "debtors", "inventory",
+        "net_block", "other_liabilities", "depreciation_pct_nfa",
+        "equity_capital", "reserves", "eps", "price", "dividend_payout",
+    ):
+        d[key] = [v if v is not None else 0.0 for v in d[key]]
     
     # Fire off individual computation sequences
     m_out = margins(d)
