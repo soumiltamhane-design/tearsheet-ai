@@ -5,6 +5,7 @@ import data_fetcher as fetcher
 import quant_engine as qe
 import ai_reasoning as ar
 import scoring_engine as se
+import excel_parser as excel_fetcher
 
 st.set_page_config(page_title="Tearsheet AI", page_icon="📊", layout="wide")
 
@@ -16,7 +17,11 @@ CALL_COLORS = {
 st.sidebar.title("📊 Tearsheet AI")
 st.sidebar.caption("Ticker in → 6-pillar score → tear sheet out")
 
-mode = st.sidebar.radio("Data source", ["Sample companies", "Live NSE ticker"])
+mode = st.sidebar.radio("Data source", ["Sample companies", "Live NSE ticker", "Upload Screener Excel"])
+
+uploaded_file = None
+use_live = False
+use_excel = False
 
 if mode == "Sample companies":
     available = fetcher.list_available_samples()
@@ -25,12 +30,20 @@ if mode == "Sample companies":
         available,
         format_func=lambda k: k.replace("_", " ").title(),
     )
-    use_live = False
-else:
+elif mode == "Live NSE ticker":
     live_ticker = st.sidebar.text_input("NSE Ticker Symbol", placeholder="e.g. RELIANCE, TCS, HDFCBANK")
     choice = live_ticker.strip().upper() if live_ticker else ""
     use_live = True
     st.sidebar.caption("Examples: RELIANCE, TCS, INFY, HDFCBANK, ITC, WIPRO, TATAMOTORS")
+else:  # Upload Screener Excel
+    uploaded_file = st.sidebar.file_uploader(
+        "Upload Screener.in Excel export (.xlsx)",
+        type=["xlsx"],
+        help="On Screener.in, open the company page and click 'Export to Excel'",
+    )
+    choice = uploaded_file.name if uploaded_file else ""
+    use_excel = True
+    st.sidebar.caption("Most accurate option — reads audited figures directly, no live-data guesswork.")
 
 qualitative_context = st.sidebar.text_area(
     "Optional: paste annual report excerpts",
@@ -57,6 +70,16 @@ with st.spinner("Running quant engine..."):
                 d = fetcher.fetch_live(choice)
             except Exception as e:
                 st.error(f"Could not fetch data for {choice}: {e}")
+                st.stop()
+    elif use_excel:
+        if not uploaded_file:
+            st.warning("Upload a Screener.in Excel export to run analysis.")
+            st.stop()
+        with st.spinner("Parsing Screener Excel file..."):
+            try:
+                d = excel_fetcher.parse_screener_excel(uploaded_file)
+            except Exception as e:
+                st.error(f"Could not parse this file: {e}")
                 st.stop()
     else:
         d = fetcher.load_sample(choice)
