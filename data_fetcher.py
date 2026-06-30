@@ -115,7 +115,17 @@ def fetch_live(ticker):
         yf_ticker = yf_ticker + ".NS"
 
     stock = yf.Ticker(yf_ticker)
-    info = _retry_yf_call(lambda: stock.info)
+
+    def _get_info():
+        i = stock.info
+        if not i:  # yfinance sometimes returns None/{} silently instead of raising
+            raise ValueError("Empty info response from Yahoo Finance")
+        return i
+
+    try:
+        info = _retry_yf_call(_get_info)
+    except Exception:
+        info = {}  # fall back to empty metadata rather than crashing the whole fetch
 
     # Get financials
     income = _retry_yf_call(lambda: stock.financials)        # Annual P&L
