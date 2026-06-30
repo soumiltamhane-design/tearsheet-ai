@@ -1,6 +1,7 @@
-import os, json
+import os, json, time
 import yfinance as yf
 import pandas as pd
+import streamlit as st
 
 TICKER_ALIASES = {
     "BAJAJ-AUTO": "bajaj_auto", "BAJAJAUTO": "bajaj_auto", "BAJAJ AUTO": "bajaj_auto",
@@ -76,20 +77,50 @@ def load_sample(key):
     raise FileNotFoundError(f"No sample data for '{key}'")
 
 
+def _retry_yf_call(fn, *args, max_attempts=3, base_delay=3, **kwargs):
+    """Calls fn(*args, **kwargs) with retry + exponential backoff.
+    Yahoo Finance rate-limits with 'Too Many Requests' errors that are
+    usually transient -- a short wait and retry often succeeds. Raises
+    the last error if every attempt fails."""
+    last_err = None
+    for attempt in range(max_attempts):
+        try:
+            return fn(*args, **kwargs)
+        except Exception as e:
+            last_err = e
+            msg = str(e).lower()
+            is_rate_limit = "too many requests" in msg or "rate limit" in msg or "429" in msg
+            if attempt < max_attempts - 1:
+                time.sleep(base_delay * (2 ** attempt))
+                continue
+            if is_rate_limit:
+                raise ValueError(
+                    "Yahoo Finance is rate-limiting requests right now. "
+                    "This is a temporary throttle on their end, not a bug -- "
+                    "wait 5-10 minutes and try again, or try the sample companies "
+                    "in the meantime."
+                ) from e
+            raise last_err
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
 def fetch_live(ticker):
-    """Fetch live data from Yahoo Finance for any NSE stock."""
+    """Fetch live data from Yahoo Finance for any NSE stock.
+    Cached for 1 hour per ticker -- repeat clicks on the same ticker
+    during testing/demo won't re-hit Yahoo at all, which is the main
+    thing that triggers rate limiting."""
     # Add .NS suffix for NSE stocks if not present
     yf_ticker = ticker.upper()
     if not yf_ticker.endswith(".NS") and not yf_ticker.endswith(".BO"):
         yf_ticker = yf_ticker + ".NS"
 
     stock = yf.Ticker(yf_ticker)
-    info = stock.info
+    info = _retry_yf_call(lambda: stock.info)
 
     # Get financials
-    income = stock.financials        # Annual P&L
-    balance = stock.balance_sheet    # Annual Balance Sheet
-    cashflow = stock.cashflow        # Annual Cash Flow
+    income = _retry_yf_call(lambda: stock.financials)        # Annual P&L
+    balance = _retry_yf_call(lambda: stock.balance_sheet)    # Annual Balance Sheet
+    cashflow = _retry_yf_call(lambda: stock.cashflow)        # Annual Cash Flow
 
     if income is None or income.empty:
         raise ValueError(f"No financial data found for {ticker}. Try the exact NSE ticker symbol.")
@@ -130,7 +161,7 @@ def fetch_live(ticker):
         shares = info.get("sharesOutstanding", 1)
         eps_raw = [round((p * 1e7) / shares, 2) if shares else 0 for p in net_profit]
 
-    price_hist = stock.history(period="5y", interval="1mo")
+    price_hist = _retry_yf_call(lambda: stock.history(period="5y", interval="1mo"))
     if not price_hist.empty:
         current_price = round(price_hist["Close"].iloc[-1], 2)
     else:
